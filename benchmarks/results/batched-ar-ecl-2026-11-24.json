@@ -1,0 +1,174 @@
+{
+  "driver": "benchmarks/var/var_prototype.py",
+  "environment": {
+    "cores": 10,
+    "cpu": "Apple M1 Pro",
+    "device": "mlx 0.32.4 on gpu (32 GiB)",
+    "machine": "arm64",
+    "memory_bytes": 34359738368,
+    "mlx": "0.32.4",
+    "mlxlearn": "0.1.7",
+    "numpy": "2.3.5",
+    "platform": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:11:29) [Clang 20.1.8 ]",
+    "scipy": "1.16.3",
+    "sklearn": "1.7.2"
+  },
+  "objective_rtol": 1e-05,
+  "parameters": {
+    "batched": true,
+    "iterations": 7,
+    "lam_scale": 1e-06,
+    "seed": 0,
+    "source": "/tmp/ecl_data_71362/electricity_hourly_dataset.tsf",
+    "synthetic_k": null,
+    "synthetic_n": null
+  },
+  "results": [
+    {
+      "backend": "metal_batched",
+      "baseline": "host_loop",
+      "d": 2,
+      "label": "batched-ar/p1",
+      "lam": 3054833.970959075,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.015521207998972386,
+        "iterations": 7,
+        "label": "batched-ar/p1[mlxlearn]",
+        "max_s": 0.06244304100255249,
+        "median_s": 0.052577250004105736,
+        "min_s": 0.046921833003580105
+      },
+      "mode": "batched_ar",
+      "n_series": 321,
+      "p": 1,
+      "shape": [
+        321,
+        26303,
+        2
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.01773750100255711,
+        "iterations": 7,
+        "label": "batched-ar/p1[sklearn]",
+        "max_s": 0.10471595900162356,
+        "median_s": 0.08772162500099512,
+        "min_s": 0.08697845799906645
+      },
+      "speedup": 1.668433114971684,
+      "speedup_best": 1.8536884096669892
+    },
+    {
+      "backend": "metal_batched",
+      "baseline": "host_loop",
+      "d": 6,
+      "label": "batched-ar/p5",
+      "lam": 5091183.6744011585,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.002031000010902062,
+        "iterations": 7,
+        "label": "batched-ar/p5[mlxlearn]",
+        "max_s": 0.07577237500663614,
+        "median_s": 0.07501516699994681,
+        "min_s": 0.07374137499573408
+      },
+      "mode": "batched_ar",
+      "n_series": 321,
+      "p": 5,
+      "shape": [
+        321,
+        26299,
+        6
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.004335167002864182,
+        "iterations": 7,
+        "label": "batched-ar/p5[sklearn]",
+        "max_s": 0.1269139170035487,
+        "median_s": 0.12306379200163065,
+        "min_s": 0.12257875000068452
+      },
+      "speedup": 1.640518803373695,
+      "speedup_best": 1.662279148005793
+    },
+    {
+      "backend": "metal_batched",
+      "baseline": "host_loop",
+      "d": 11,
+      "label": "batched-ar/p10",
+      "lam": 5553668.071656255,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.007825916000001598,
+        "iterations": 7,
+        "label": "batched-ar/p10[mlxlearn]",
+        "max_s": 0.1049874579985044,
+        "median_s": 0.09984800000529503,
+        "min_s": 0.0971615419985028
+      },
+      "mode": "batched_ar",
+      "n_series": 321,
+      "p": 10,
+      "shape": [
+        321,
+        26294,
+        11
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.002077124998322688,
+        "iterations": 7,
+        "label": "batched-ar/p10[sklearn]",
+        "max_s": 0.20814866599539528,
+        "median_s": 0.20735470799991162,
+        "min_s": 0.2060715409970726
+      },
+      "speedup": 2.0767036694667436,
+      "speedup_best": 2.120916740908126
+    },
+    {
+      "backend": "metal_batched",
+      "baseline": "host_loop",
+      "d": 21,
+      "label": "batched-ar/p20",
+      "lam": 5817430.617019816,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.0178720420008176,
+        "iterations": 7,
+        "label": "batched-ar/p20[mlxlearn]",
+        "max_s": 0.17674370799795724,
+        "median_s": 0.1639513749978505,
+        "min_s": 0.15887166599713964
+      },
+      "mode": "batched_ar",
+      "n_series": 321,
+      "p": 20,
+      "shape": [
+        321,
+        26284,
+        21
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.006767125996702816,
+        "iterations": 7,
+        "label": "batched-ar/p20[sklearn]",
+        "max_s": 0.3251411669989466,
+        "median_s": 0.3194678340005339,
+        "min_s": 0.31837404100224376
+      },
+      "speedup": 1.9485523314746358,
+      "speedup_best": 2.003969927576487
+    }
+  ]
+}

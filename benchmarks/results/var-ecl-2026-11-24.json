@@ -1,0 +1,246 @@
+{
+  "driver": "benchmarks/var/var_prototype.py",
+  "environment": {
+    "cores": 10,
+    "cpu": "Apple M1 Pro",
+    "device": "mlx 0.32.4 on gpu (32 GiB)",
+    "machine": "arm64",
+    "memory_bytes": 34359738368,
+    "mlx": "0.32.4",
+    "mlxlearn": "0.1.7",
+    "numpy": "2.3.5",
+    "platform": "macOS-26.7.3-arm64-arm-64bit-Mach-O",
+    "processor": "arm",
+    "python": "3.13.9 | packaged by Anaconda, Inc. | (main, Oct 21 2025, 19:11:29) [Clang 20.1.8 ]",
+    "scipy": "1.16.3",
+    "sklearn": "1.7.2"
+  },
+  "objective_rtol": 1e-05,
+  "parameters": {
+    "batched": false,
+    "iterations": 7,
+    "lam_scale": 1e-06,
+    "seed": 0,
+    "source": "/tmp/ecl_data_71362/electricity_hourly_dataset.tsf",
+    "synthetic_k": null,
+    "synthetic_n": null
+  },
+  "results": [
+    {
+      "backend": "metal_gram",
+      "baseline": "sklearn_ridge",
+      "d": 322,
+      "k": 321,
+      "label": "var/p1/metal_gram",
+      "lam": 6090693.791735298,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.02969337499962421,
+        "iterations": 7,
+        "label": "var/p1/metal_gram[mlxlearn]",
+        "max_s": 0.11113050000130897,
+        "median_s": 0.09293812499527121,
+        "min_s": 0.08143712500168476
+      },
+      "mode": "var",
+      "objective": 15137182561879.912,
+      "p": 1,
+      "shape": [
+        26303,
+        322
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.07148579100612551,
+        "iterations": 7,
+        "label": "var/p1/metal_gram[sklearn]",
+        "max_s": 0.22976183300488628,
+        "median_s": 0.16247233399917604,
+        "min_s": 0.15827604199876077
+      },
+      "speedup": 1.7481774460959139,
+      "speedup_best": 1.9435367100138465
+    },
+    {
+      "backend": "host_gram",
+      "baseline": "sklearn_ridge",
+      "d": 322,
+      "k": 321,
+      "label": "var/p1/host_gram",
+      "lam": 6090693.791735298,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.022249666006246116,
+        "iterations": 7,
+        "label": "var/p1/host_gram[mlxlearn]",
+        "max_s": 0.14016554100089706,
+        "median_s": 0.13094524999905843,
+        "min_s": 0.11791587499465095
+      },
+      "mode": "var",
+      "objective": 15137181243561.8,
+      "p": 1,
+      "shape": [
+        26303,
+        322
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.04055787499964936,
+        "iterations": 7,
+        "label": "var/p1/host_gram[sklearn]",
+        "max_s": 0.19577987500088057,
+        "median_s": 0.16425483299826737,
+        "min_s": 0.1552220000012312
+      },
+      "speedup": 1.2543779403945423,
+      "speedup_best": 1.3163791559726168
+    },
+    {
+      "backend": "metal_gram",
+      "baseline": "sklearn_ridge",
+      "d": 643,
+      "k": 321,
+      "label": "var/p2/metal_gram",
+      "lam": 6100113.014772442,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.019934707997890655,
+        "iterations": 7,
+        "label": "var/p2/metal_gram[mlxlearn]",
+        "max_s": 0.15828858299937565,
+        "median_s": 0.14931216700642835,
+        "min_s": 0.138353875001485
+      },
+      "mode": "var",
+      "objective": 12234239624097.307,
+      "p": 2,
+      "shape": [
+        26302,
+        643
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.11939924999751383,
+        "iterations": 7,
+        "label": "var/p2/metal_gram[sklearn]",
+        "max_s": 0.3939689160033595,
+        "median_s": 0.34127241700480226,
+        "min_s": 0.27456966600584565
+      },
+      "speedup": 2.2856303263625493,
+      "speedup_best": 1.9845462658917115
+    },
+    {
+      "backend": "host_gram",
+      "baseline": "sklearn_ridge",
+      "d": 643,
+      "k": 321,
+      "label": "var/p2/host_gram",
+      "lam": 6100113.014772442,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.11520408299838891,
+        "iterations": 7,
+        "label": "var/p2/host_gram[mlxlearn]",
+        "max_s": 0.367229875002522,
+        "median_s": 0.2740444579976611,
+        "min_s": 0.2520257920041331
+      },
+      "mode": "var",
+      "objective": 12234190353758.117,
+      "p": 2,
+      "shape": [
+        26302,
+        643
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.08073545799561543,
+        "iterations": 7,
+        "label": "var/p2/host_gram[sklearn]",
+        "max_s": 0.3880638749978971,
+        "median_s": 0.36922237500402844,
+        "min_s": 0.30732841700228164
+      },
+      "speedup": 1.3473083079358594,
+      "speedup_best": 1.2194324023679355
+    },
+    {
+      "backend": "metal_gram",
+      "baseline": "sklearn_ridge",
+      "d": 964,
+      "k": 321,
+      "label": "var/p3/metal_gram",
+      "lam": 6103216.178977462,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.12309383298998,
+        "iterations": 7,
+        "label": "var/p3/metal_gram[mlxlearn]",
+        "max_s": 0.3003339579954627,
+        "median_s": 0.21718029100156855,
+        "min_s": 0.1772401250054827
+      },
+      "mode": "var",
+      "objective": 11195735512258.08,
+      "p": 3,
+      "shape": [
+        26301,
+        964
+      ],
+      "significant": true,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.3079204590030713,
+        "iterations": 7,
+        "label": "var/p3/metal_gram[sklearn]",
+        "max_s": 0.7409311250012252,
+        "median_s": 0.5046841669973219,
+        "min_s": 0.43301066599815385
+      },
+      "speedup": 2.32380279384411,
+      "speedup_best": 2.443073575945397
+    },
+    {
+      "backend": "host_gram",
+      "baseline": "sklearn_ridge",
+      "d": 964,
+      "k": 321,
+      "label": "var/p3/host_gram",
+      "lam": 6103216.178977462,
+      "mlxlearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.26885904200025834,
+        "iterations": 7,
+        "label": "var/p3/host_gram[mlxlearn]",
+        "max_s": 0.6534162090028985,
+        "median_s": 0.4042346669957624,
+        "min_s": 0.3845571670026402
+      },
+      "mode": "var",
+      "objective": 11195557551009.428,
+      "p": 3,
+      "shape": [
+        26301,
+        964
+      ],
+      "significant": false,
+      "sklearn": {
+        "cold_start_s": null,
+        "iqr_s": 0.16913512400060426,
+        "iterations": 7,
+        "label": "var/p3/host_gram[sklearn]",
+        "max_s": 0.6054166660032934,
+        "median_s": 0.48608395799965365,
+        "min_s": 0.4362815420026891
+      },
+      "speedup": 1.202479642857423,
+      "speedup_best": 1.1345037342645439
+    }
+  ]
+}

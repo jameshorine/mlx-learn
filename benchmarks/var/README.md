@@ -1,9 +1,11 @@
 # VAR(p) benchmarks
 
-**A VAR(1) on 321 electricity series over 26,304 hours fits in 80.6 ms against
-scikit-learn's 140.8 ms — 1.75x — solving the identical ridge normal equations, with the
-objective agreeing to 8.7e-08 against a 1e-5 gate. At p=2 it is 2.05x. From p=3 the
-float32 Gram stops clearing the gate, so the usable envelope on this data is p <= 2.**
+**A VAR(1) on 321 electricity series over 26,304 hours fits in 92.9 ms against
+scikit-learn's 162.5 ms — 1.75x, significant — solving the identical ridge normal
+equations, with the objective agreeing to 8.7e-08 against a 1e-5 gate. At p=2 it is 2.29x.
+From p=3 the float32 Gram stops clearing the gate, so the usable envelope on this data is
+p <= 2.** Separately, fitting one independent AR(p) per series as a single batched Gram
+runs 1.6x-2.1x a host loop; that is the only AR shape that wins at all.
 
 A prototype, not part of the gated suite. It exists to answer one question before any
 estimator is written: a vector autoregression reduces to multi-output least squares, so
@@ -104,57 +106,90 @@ python -m benchmarks.var.var_prototype --tsf electricity_hourly_dataset.tsf --sw
 ## What has been measured
 
 Electricity-hourly (321 series, 26,304 hours; Monash `electricity_hourly`), ridge at
-``lam = 1e-6 * trace(Z'Z) / d``, on an **M1 Pro (8P+2E, 32 GiB)**, MLX 0.32.4,
-scikit-learn 1.7.2, SciPy 1.16.3, NumPy 2.3.5. Min of 3 with warmup.
+``lam = 1e-6 * trace(Z'Z) / d``, on an **Apple M1 Pro, 10 cores, 32 GiB**, MLX 0.32.4 on
+GPU, scikit-learn 1.7.2, SciPy 1.16.3, NumPy 2.3.5.
 
-**Timed region**: the solve only. ``lag_design`` is built once outside it — it copies
+Timing goes through [`benchmarks/_harness.py`](../_harness.py)'s `compare`: two warmup
+pairs, then seven rounds alternating the two sides inside one gc-disabled window, reported
+as medians with a spread and a significance test on the median's own uncertainty. Raw
+records, including the environment block:
+
+- [`benchmarks/results/var-ecl-2026-11-24.json`](../results/var-ecl-2026-11-24.json)
+- [`benchmarks/results/batched-ar-ecl-2026-11-24.json`](../results/batched-ar-ecl-2026-11-24.json)
+
+Reproduce with:
+
+```bash
+python -m benchmarks.var.var_prototype --tsf electricity_hourly_dataset.tsf \
+    --sweep 1 2 3 --backends metal_gram host_gram sklearn_ridge \
+    --output benchmarks/results/var-ecl-<date>.json
+```
+
+**Timed region**: the solve only. `lag_design` is built once outside it — it copies
 67.8 MB at ``p=1`` and is identical for every backend, so timing it would flatten the
-ratios and measure NumPy's copy. The host-to-device upload **is** inside `metal_gram`'s
-interval.
+ratios. The host-to-device upload **is** inside the Metal interval.
 
-| p | d | `metal_gram` | `host_gram` | `sklearn_ridge` | `solve_ols` | vs sklearn | objective rel | gate |
-|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 1 | 322 | **80.6 ms** | 124.1 | 140.8 | 1625.6 | **1.75x** | 8.71e-08 | pass |
-| 2 | 643 | **128.8 ms** | 274.6 | 264.4 | 2642.9 | **2.05x** | 4.03e-06 | pass |
-| 3 | 964 | 187.0 ms | 417.6 | 425.7 | 4046.6 | 2.28x | 1.59e-05 | **FAIL** |
-| 5 | 1606 | 290.2 ms | 765.1 | 942.1 | 9923.8 | 3.25x | 5.27e-04 | **FAIL** |
+### VAR(p), against `sklearn.Ridge(solver="cholesky")`
 
-Three things to read off it.
+| p | d | `metal_gram` median | `sklearn_ridge` median | median | best | significant | objective rel | gate |
+|---:|---:|---:|---:|---:|---:|---|---:|---|
+| 1 | 322 | 92.9 ms | 162.5 ms | **1.75x** | 1.94x | yes | 8.71e-08 | pass |
+| 2 | 643 | 149.3 ms | 341.3 ms | **2.29x** | 1.98x | yes | 4.03e-06 | pass |
+| 3 | 964 | 217.2 ms | 504.7 ms | 2.32x | 2.44x | yes | 1.59e-05 | **FAIL** |
 
-**Speed improves with p; accuracy does not.** `metal_gram` gains on both host paths as the
-design widens — 1.54x to 2.64x over `host_gram` — because the Gram grows as ``O(n d^2)``
-while the host Cholesky it leaves behind grows only as ``O(d^3)``, still under 1% of the
-work at ``d = 1606``. But the objective error grows roughly sixfold per lag and crosses the
-``1e-5`` gate at ``p = 3``. Consecutive lags of the same series are nearly collinear, so
-each lag block worsens ``cond(Z'Z)`` while adding more float32 accumulation. The usable
-envelope here is ``p <= 2``.
+`host_gram` — the same normal equations entirely in host float64 — is **not significant**
+against scikit-learn at any of the three (1.20x-1.29x, inside the noise). The win is
+specifically the Metal Gram, not normal-equations-versus-`Ridge`.
 
-**`solve_ols` is the wrong path for this problem**, at 0.08x–0.10x. It is certified
-float64, so it cannot reach the GPU, and the ridge augmentation adds ``d`` rows to a
-solver that then certifies the rank of all of them.
+### Batched AR(p): one independent model per series, against a host loop
 
-**The accuracy failure is in the objective, which is the assertion that matters.** The
-coefficients fail their own (weaker) tolerance earlier still — at ``cond(Z'Z) = 1.38e14``
-they are not pinned down by the data at all. `fp32_policy.md` section 3 states the
-principle directly: "Coefficients are the weak assertion; objective value is the strong
-one... two solvers can reach very different coefficients that are equally good."
+| p | d | Metal batched median | host loop median | median | best | significant | coef rel |
+|---:|---:|---:|---:|---:|---:|---|---:|
+| 1 | 2 | 52.6 ms | 87.7 ms | **1.67x** | 1.85x | yes | 1.59e-04 |
+| 5 | 6 | 75.0 ms | 123.1 ms | **1.64x** | 1.66x | yes | 2.66e-04 |
+| 10 | 11 | 99.8 ms | 207.4 ms | **2.08x** | 2.12x | yes | 4.91e-04 |
+| 20 | 21 | 164.0 ms | 319.5 ms | **1.95x** | 2.00x | yes | 6.08e-03 |
+
+A single AR(p) fit does not win and cannot: at ``k=1`` the design is ``d = p+1``, the whole
+problem is 0.2-23 Mflop — three to four orders below where PCA's crossover sits — and Metal
+measures 0.24x at p=1 rising only to 0.96x at p=20, never crossing 1. Batching 321 of them
+into one Gram is what makes the work GPU-sized. Note the coefficient error at ``p=20``
+(6.08e-03) exceeds the ``atol=2e-3, rtol=5e-3`` tolerance in `docs/fp32_policy.md`.
+
+### Reading these
+
+`solve_ols` is the wrong path for this problem, at 0.08x-0.10x: it is certified float64,
+float64 does not execute on Metal, so it cannot reach the device, and ridge by design
+augmentation adds ``d`` rows whose rank it then certifies.
+
+Speed improves with ``p`` while accuracy degrades. The Gram grows ``O(n d^2)`` while the
+host Cholesky it leaves behind grows ``O(d^3)`` and stays under 1% of the flops, but
+consecutive lags of the same series are nearly collinear, so each lag block worsens
+``cond(Z'Z)`` while adding more float32 accumulation.
+
+The objective is the assertion that matters. At ``cond(Z'Z) = 1.38e14`` the coefficients
+are not pinned down by the data at all — `fp32_policy.md` section 3: "Coefficients are the
+weak assertion; objective value is the strong one... two solvers can reach very different
+coefficients that are equally good."
 
 ## What is not established
 
 - One dataset, one shape, one machine, one seed. Nothing here is a crossover.
-- Timings are min-of-3 with warmup but **not interleaved** and with no thermal gating, so
-  they do not meet the bar in [`docs/development.md`](../../docs/development.md). Observed
-  run-to-run spread on the scikit-learn side is around 25%.
-- An earlier revision of this file reported 8.0x at ``p=1``. That number excluded the
-  host-to-device upload (9.3 ms of the 15.4 ms Gram cost) and compared against a bare
-  normal-equations solve rather than `Ridge`. With the upload inside the timed region and
-  `Ridge` as the baseline it is 1.75x. Treat any figure here as provisional until it is
-  produced by the interleaved harness.
+- **Run-to-run variance is large even interleaved.** Two consecutive runs of the same
+  sweep gave 1.81x and 1.75x at ``p=1``, and 2.62x and 2.29x at ``p=2`` — roughly 10-15%
+  on the ratio. Treat the third digit as noise.
+- Earlier revisions of this file reported min-of-3 timings taken without interleaving.
+  On this machine that underestimated the median by 16-30%, and unevenly between the two
+  sides, which biases the ratio rather than only the absolutes. One figure was badly
+  wrong: batched AR was reported at 3.7x-11.5x against a host loop and 6.6x-22x against
+  scikit-learn, the latter comparing min-of-3 against a **single** scikit-learn run. The
+  interleaved numbers above are 1.6x-2.1x. Every figure in this file now comes from the
+  committed JSON rather than from a transcription.
 - Whether ``Sigma`` and the ``T - Kp - 1`` degrees-of-freedom correction survive a float32
-  Gram is untested. Both inherit coefficient error, which fails above, rather than
-  objective error, which passes.
+  Gram is untested. Both inherit coefficient error, which already fails its tolerance at
+  batched ``p=20``, rather than objective error, which passes.
 - Whether a compensated or mixed-precision Gram (`mlxlearn_device/_compensated.py`) would
-  push the envelope past ``p = 2``.
+  push the VAR envelope past ``p = 2``.
 - Whether any of this reproduces on the Ultra hardware the published grid used, where
   `ols.py` already wins and the host path may simply be the better answer.
 

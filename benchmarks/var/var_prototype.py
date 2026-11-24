@@ -60,6 +60,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 import numpy as np
@@ -75,6 +76,9 @@ __all__ = [
     "companion_spectral_radius",
     "default_rcond",
     "load_tsf",
+    "batched_lag_design",
+    "batched_fit_metal",
+    "batched_fit_host",
     "fit_design",
     "fit_var",
     "BACKENDS",
@@ -287,6 +291,56 @@ def fit_var(Y: np.ndarray, p: int, *, lam: float = 0.0, backend: str = "metal_gr
     return fit_design(Z, T, lam=lam, backend=backend)
 
 
+def batched_lag_design(Y: np.ndarray, p: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-series AR(p) designs stacked on a leading batch axis.
+
+    One independent AR(p) per column of ``Y``, which is the panel case: a model per
+    meter, per sensor, per SKU. Returns ``Z`` of shape ``(B, n-p, p+1)`` with the
+    intercept first and ``T`` of shape ``(B, n-p, 1)``.
+    """
+    Y = np.ascontiguousarray(Y)
+    if Y.ndim != 2:
+        raise ValueError(f"Y must be 2-d (n, B), got shape {Y.shape}")
+    n, B = Y.shape
+    if p < 1:
+        raise ValueError(f"p must be >= 1, got {p}")
+    if n <= p:
+        raise ValueError(f"need n > p, got n={n}, p={p}")
+    W = np.lib.stride_tricks.sliding_window_view(Y, (p, B))[:-1, 0]        # (n-p, p, B)
+    lags = np.ascontiguousarray(W[:, ::-1, :].transpose(2, 0, 1))          # (B, n-p, p)
+    Z = np.empty((B, n - p, p + 1), dtype=np.float64)
+    Z[:, :, 0] = 1.0
+    Z[:, :, 1:] = lags
+    return Z, np.ascontiguousarray(Y[p:].T)[:, :, None]
+
+
+def batched_fit_metal(Z: np.ndarray, T: np.ndarray, lam: float) -> np.ndarray:
+    """One batched float32 Gram on Metal, then ``B`` small float64 solves on the host."""
+    import mlx.core as mx
+
+    Zf = mx.array(np.ascontiguousarray(Z, dtype=np.float32))
+    Tf = mx.array(np.ascontiguousarray(T, dtype=np.float32))
+    G = mx.matmul(mx.swapaxes(Zf, 1, 2), Zf)
+    C = mx.matmul(mx.swapaxes(Zf, 1, 2), Tf)
+    mx.eval(G, C)
+    G64 = np.array(G, dtype=np.float64)
+    C64 = np.array(C, dtype=np.float64)
+    d = Z.shape[2]
+    G64[:, np.arange(d), np.arange(d)] += lam
+    return np.linalg.solve(G64, C64)
+
+
+def batched_fit_host(Z: np.ndarray, T: np.ndarray, lam: float) -> np.ndarray:
+    """The same fits as a host loop, one series at a time."""
+    B, _, d = Z.shape
+    out = np.empty((B, d, 1))
+    for b in range(B):
+        G = Z[b].T @ Z[b]
+        G[np.diag_indices(d)] += lam
+        out[b] = np.linalg.solve(G, Z[b].T @ T[b])
+    return out
+
+
 def load_tsf(path: str) -> np.ndarray:
     """Read a Monash ``.tsf`` file into an ``(n_timesteps, n_series)`` array.
 
@@ -341,15 +395,60 @@ def synthetic(n: int, k: int, p: int, seed: int) -> np.ndarray:
     return Y[burn:]
 
 
-def _bench(fn, repeats: int) -> float:
-    fn()  # warm: MLX compiles per shape, and BLAS pools spin up on first call
-    return min(_timed(fn) for _ in range(repeats))
+#: Every comparison made in a run, as ``Comparison.as_dict()`` plus its parameters.
+_RECORDS: list[dict] = []
 
 
-def _timed(fn) -> float:
-    start = time.perf_counter()
-    fn()
-    return time.perf_counter() - start
+def _compare(mlx_fn, sk_fn, *, label, shape, iterations):
+    """Interleaved A/B through the repository's own harness.
+
+    ``benchmarks._harness.compare`` runs both sides alternately inside one
+    gc-disabled window, so a thermal ramp degrades both rather than whichever ran
+    second, and reports medians with a spread plus a significance test on the
+    median's own uncertainty. Earlier revisions of this file used min-of-N with no
+    interleaving; on this machine that underestimated the median by 16-30% and did so
+    unevenly between the two sides, which biases the ratio and not merely the
+    absolutes.
+    """
+    from benchmarks._harness import compare
+
+    return compare(mlx_fn, sk_fn, label=label, shape=shape, iterations=iterations)
+
+
+def _record(cmp, **params) -> None:
+    """Keep a comparison for ``--output``, so reports cite a file and not a transcription."""
+    _RECORDS.append({**cmp.as_dict(), **params})
+
+
+def _write_results(path: str, args) -> None:
+    from benchmarks._harness import environment
+
+    payload = {
+        "driver": "benchmarks/var/var_prototype.py",
+        "environment": environment(),
+        "parameters": {
+            "source": args.tsf or "synthetic",
+            "lam_scale": args.lam_scale,
+            "iterations": args.repeats,
+            "batched": bool(args.batched),
+            "synthetic_n": args.n if args.synthetic else None,
+            "synthetic_k": args.k if args.synthetic else None,
+            "seed": args.seed,
+        },
+        "objective_rtol": OBJECTIVE_RTOL,
+        "results": _RECORDS,
+    }
+    with open(path, "w") as handle:
+        json.dump(payload, handle, indent=2, sort_keys=True)
+    print(f"\nwrote {len(_RECORDS)} records to {path}")
+
+
+def _line(name: str, cmp) -> str:
+    mlx, sk = cmp.mlxlearn, cmp.sklearn
+    flag = "" if cmp.significant else "   (not significant)"
+    return (f"  {name:14} {mlx.median_s * 1000:8.1f} ms  +/-{mlx.iqr_s * 1000:6.1f}"
+            f"   vs {sk.median_s * 1000:8.1f} ms  +/-{sk.iqr_s * 1000:6.1f}"
+            f"   {cmp.speedup:6.2f}x median  {cmp.speedup_best:6.2f}x best{flag}")
 
 
 def _report(Y: np.ndarray, p: int, lam_scale: float, backends: list[str], repeats: int) -> None:
@@ -360,36 +459,54 @@ def _report(Y: np.ndarray, p: int, lam_scale: float, backends: list[str], repeat
     lam = lam_scale * float(np.trace(G64)) / d
     print(f"\np={p}  k={k}  d=kp+1={d}  design {n} x {d}  lam={lam:.6g}")
 
-    results = {}
+    baseline = "sklearn_ridge"
+    if baseline not in backends:
+        print(f"  (no {baseline} baseline requested; nothing to compare against)")
+        return
+    ref_obj = None
     for backend in backends:
+        if backend == baseline:
+            continue
         try:
-            # Z and T are built once, above; only the solve is timed.
-            seconds = _bench(lambda b=backend: fit_design(Z, T, lam=lam, backend=b), repeats)
+            cmp = _compare(lambda b=backend: fit_design(Z, T, lam=lam, backend=b),
+                           lambda: fit_design(Z, T, lam=lam, backend=baseline),
+                           label=f"var/p{p}/{backend}", shape=(n, d), iterations=repeats)
+            print(_line(backend, cmp))
             out = fit_design(Z, T, lam=lam, backend=backend)
-            out["seconds"] = seconds
-            results[backend] = out
+            _record(cmp, p=p, k=k, d=d, lam=lam, backend=backend, baseline=baseline,
+                    objective=out["objective"], mode="var")
+            if ref_obj is None:
+                ref_obj = fit_design(Z, T, lam=lam, backend=baseline)["objective"]
+            if backend not in UNREGULARISED:
+                rel = abs(out["objective"] - ref_obj) / abs(ref_obj)
+                verdict = "pass" if rel < OBJECTIVE_RTOL else "FAIL"
+                print(f"  {'':14} objective rel {rel:9.2e} vs {baseline} [{verdict}]")
         except Exception as exc:  # noqa: BLE001 - a prototype reports and continues
             print(f"  {backend:14} FAILED: {type(exc).__name__}: {exc}")
 
-    ref = results.get("host_gram")
-    width = max(len(b) for b in results) if results else 0
-    for backend, out in results.items():
-        line = f"  {backend:{width}}  {out['seconds'] * 1000:8.1f} ms"
-        if ref is not None:
-            line += f"   {ref['seconds'] / out['seconds']:6.2f}x vs host_gram"
-            if backend in UNREGULARISED and lam:
-                # Solves min ||T - ZB'||^2 with no penalty, so its ridge objective is
-                # legitimately larger. Comparing it to the ridge solution is meaningless.
-                line += "   obj rel        n/a [ignores lam]"
-            else:
-                rel = abs(out["objective"] - ref["objective"]) / abs(ref["objective"])
-                gate = "pass" if rel < OBJECTIVE_RTOL else "FAIL"
-                line += f"   obj rel {rel:9.2e} [{gate}]"
-        print(line)
+    B = fit_design(Z, T, lam=lam, backend=baseline)["coef"]
+    rho = companion_spectral_radius(B, k, p)
+    print(f"  {'':14} companion rho = {rho:.4f} ({'stable' if rho < 1 else 'UNSTABLE'})")
 
-    if "host_gram" in results:
-        rho = companion_spectral_radius(results["host_gram"]["coef"], k, p)
-        print(f"  companion rho = {rho:.4f} ({'stable' if rho < 1 else 'UNSTABLE'})")
+
+def _report_batched(Y: np.ndarray, p: int, lam_scale: float, repeats: int) -> None:
+    """One independent AR(p) per column: the panel case."""
+    Z, T = batched_lag_design(Y, p)
+    B, rows, d = Z.shape
+    lam = lam_scale * float(np.einsum("bij,bij->", Z, Z)) / (B * d)
+    print(f"\nbatched AR(p={p})  B={B} series  n={rows}  d=p+1={d}  lam={lam:.6g}")
+
+    cmp = _compare(lambda: batched_fit_metal(Z, T, lam),
+                   lambda: batched_fit_host(Z, T, lam),
+                   label=f"batched-ar/p{p}", shape=(B, rows, d), iterations=repeats)
+    print(_line("metal batched", cmp))
+    _record(cmp, p=p, n_series=B, d=d, lam=lam, backend="metal_batched",
+            baseline="host_loop", mode="batched_ar")
+
+    coef_metal = batched_fit_metal(Z, T, lam)
+    coef_host = batched_fit_host(Z, T, lam)
+    denom = max(float(np.abs(coef_host).max()), 1e-300)
+    print(f"  {'':14} coef rel vs host loop {float(np.abs(coef_metal - coef_host).max()) / denom:9.2e}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -404,7 +521,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n", type=int, default=26304, help="synthetic only")
     parser.add_argument("--k", type=int, default=321, help="synthetic only")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--repeats", type=int, default=7,
+                        help="interleaved rounds passed to the shared harness")
+    parser.add_argument("--output", help="write raw results JSON here")
+    parser.add_argument("--batched", action="store_true",
+                        help="one independent AR(p) per column instead of one VAR(p)")
     parser.add_argument("--backends", nargs="+", default=list(BACKENDS), choices=BACKENDS)
     args = parser.parse_args(argv)
 
@@ -414,7 +535,12 @@ def main(argv: list[str] | None = None) -> int:
           f"source={'tsf' if args.tsf else 'synthetic'}  repeats={args.repeats}")
     print(f"objective gate: rtol < {OBJECTIVE_RTOL:g} vs host_gram (docs/fp32_policy.md s3)")
     for p in orders:
-        _report(Y, p, args.lam_scale, list(args.backends), args.repeats)
+        if args.batched:
+            _report_batched(Y, p, args.lam_scale, args.repeats)
+        else:
+            _report(Y, p, args.lam_scale, list(args.backends), args.repeats)
+    if args.output:
+        _write_results(args.output, args)
     return 0
 
 
