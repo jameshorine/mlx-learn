@@ -54,6 +54,18 @@ __all__ = [
 #: ill-conditioned design the coefficients are not determined by the data at all.
 OBJECTIVE_RTOL = 1e-5
 
+#: docs/fp32_policy.md section 3, the weak assertion. Recorded and gated alongside the
+#: objective because the objective is nearly blind to coefficient error on an
+#: ill-conditioned design: measured obj_rel 2.70e-06 (pass) with coef_rel 1.01e-01.
+COEF_ATOL, COEF_RTOL = 2e-3, 5e-3
+
+_FELL_BACK = False
+
+
+def _note_fallback() -> None:
+    global _FELL_BACK
+    _FELL_BACK = True
+
 #: ``sklearn_bare`` is the fair baseline: scikit-learn's own `_solve_cholesky` with no
 #: estimator around it. ``sklearn`` keeps the full `Ridge.fit` so the overhead is visible
 #: as its own arm rather than folded into the Metal side's favour.
@@ -90,7 +102,9 @@ def gram_metal(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.array(G, dtype=np.float64), np.array(C, dtype=np.float64)
 
 
-def solve_normal_equations(G: np.ndarray, C: np.ndarray, alpha: float) -> np.ndarray:
+def solve_normal_equations(G: np.ndarray, C: np.ndarray, alpha: float, *,
+                           X: np.ndarray | None = None, y: np.ndarray | None = None,
+                           on_fallback=None) -> np.ndarray:
     """``(G + alpha I)^-1 C`` by float64 Cholesky, falling back as scikit-learn does.
 
     Does not mutate ``G``.
@@ -104,28 +118,50 @@ def solve_normal_equations(G: np.ndarray, C: np.ndarray, alpha: float) -> np.nda
     try:
         return sla.solve(G, C, assume_a="pos")
     except np.linalg.LinAlgError:
-        # A float32 Gram can be indefinite where the float64 one is not: measured
-        # lambda_min = -1.315e-08 at n=32768, d=512, cond=1e12 against +1.905e-08 in
-        # float64. scikit-learn degrades rather than failing here -- `_ridge_regression`
-        # catches the same error and retries with solver="svd" (sklearn/linear_model/
-        # _ridge.py:748-752) -- so a benchmark that crashes is not comparing like for like.
+        if on_fallback is not None:
+            on_fallback()
+        if X is not None and y is not None:
+            # What scikit-learn actually does: solver="svd" -> _solve_svd(X, y, alpha),
+            # an SVD of X forming s/(s^2+alpha), bounded by 1/(2*sqrt(alpha)) in every
+            # direction (sklearn/linear_model/_ridge.py:757-761, :299-308). lstsq on the
+            # already-regularised Gram instead inverts the spurious negative eigenvalue,
+            # so it is unbounded: measured 4.96e-02 relative error against _solve_svd's
+            # 9.28e-09 on a near-collinear design.
+            from sklearn.linear_model._ridge import _solve_svd
+
+            y2 = np.asarray(y, dtype=np.float64)
+            y2 = y2.reshape(-1, 1) if y2.ndim == 1 else y2
+            return _solve_svd(np.asarray(X, dtype=np.float64), y2,
+                              np.full(y2.shape[1], float(alpha))).T
+        # Without X there is nothing better available; this path is unbounded and is
+        # only reachable from a direct call.
         return np.linalg.lstsq(G, C, rcond=None)[0]
 
 
-def make_problem(n: int, d: int, targets: int, seed: int, *, cond: float = 1.0):
+def make_problem(n: int, d: int, targets: int, seed: int, *, cond: float = 1.0,
+                 snr: float = 10.0):
     """A dense regression problem, optionally ill-conditioned.
 
-    ``cond`` scales the design's singular values geometrically from 1 down to ``1/cond``,
-    which is how the sensitivity of the float32 Gram to conditioning gets exercised.
+    ``cond`` sets the design's singular values geometrically from 1 down to ``1/cond``;
+    ``snr`` fixes the ratio of signal RMS to noise scale, so conditioning is the only
+    thing a ``--cond`` sweep varies.
     """
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n, d))
-    if cond > 1.0:
-        U, _, Vt = np.linalg.svd(X, full_matrices=False)
-        s = np.geomspace(1.0, 1.0 / cond, num=min(n, d))
-        X = (U * s) @ Vt
+    # Every cond goes through the same rebuild, including cond == 1.0. Taking the branch
+    # only when cond > 1 left that row at the raw Gaussian scale while every other row was
+    # normalised to sigma_max = 1, so a sweep varied the design scale as well as the
+    # conditioning. Noise is then set from a fixed signal-to-noise ratio rather than a
+    # literal 0.1, because a fixed absolute noise against a shrinking X made every
+    # ill-conditioned row noise-dominated -- at cond=1e8, 97% of the objective was noise
+    # the coefficients cannot touch, which is what made the objective gate uninformative.
+    U, _, Vt = np.linalg.svd(X, full_matrices=False)
+    spectrum = np.geomspace(1.0, 1.0 / cond, num=min(n, d))
+    X = (U * spectrum) @ Vt
     beta = rng.normal(size=(d, targets))
-    y = X @ beta + rng.normal(scale=0.1, size=(n, targets))
+    signal = X @ beta
+    scale = float(np.sqrt((signal * signal).mean())) / snr
+    y = signal + rng.normal(scale=scale, size=(n, targets))
     return np.ascontiguousarray(X), np.ascontiguousarray(y)
 
 
@@ -137,10 +173,14 @@ def ridge_objective(X: np.ndarray, y: np.ndarray, coef: np.ndarray, alpha: float
 
 def fit_ridge(X: np.ndarray, y: np.ndarray, alpha: float, *, backend: str) -> np.ndarray:
     """Coefficients of shape ``(d, targets)``. No intercept; callers centre if they want one."""
+    y = np.asarray(y, dtype=np.float64)
+    y = y.reshape(-1, 1) if y.ndim == 1 else y
     if backend == "metal_gram":
-        return solve_normal_equations(*gram_metal(X, y), alpha)
+        return solve_normal_equations(*gram_metal(X, y), alpha, X=X, y=y,
+                                      on_fallback=_note_fallback)
     if backend == "host_gram":
-        return solve_normal_equations(*gram_host(X, y), alpha)
+        return solve_normal_equations(*gram_host(X, y), alpha, X=X, y=y,
+                                      on_fallback=_note_fallback)
     if backend == "sklearn":
         from sklearn.linear_model import Ridge
 
@@ -155,19 +195,18 @@ def fit_ridge(X: np.ndarray, y: np.ndarray, alpha: float, *, backend: str) -> np
         # gap is largest at small d where the algebra is cheapest.
         from sklearn.linear_model._ridge import _solve_cholesky
 
-        y2 = np.asarray(y, dtype=np.float64)
-        y2 = y2.reshape(-1, 1) if y2.ndim == 1 else y2
-        return _solve_cholesky(np.asarray(X, dtype=np.float64), y2,
-                               np.full(y2.shape[1], float(alpha))).T
+        return _solve_cholesky(np.asarray(X, dtype=np.float64), y,
+                               np.full(y.shape[1], float(alpha))).T
     raise ValueError(f"unknown backend {backend!r}")
 
 
 def _run(n: int, d: int, targets: int, alpha_scale: float, cond: float,
          seed: int, iterations: int, records: list[dict], *,
-         baseline: str = "sklearn_bare", alpha_abs: float | None = None) -> None:
+         baseline: str = "sklearn_bare", alpha_abs: float | None = None,
+         snr: float = 10.0) -> None:
     from benchmarks._harness import compare
 
-    X, y = make_problem(n, d, targets, seed, cond=cond)
+    X, y = make_problem(n, d, targets, seed, cond=cond, snr=snr)
     G, _ = gram_host(X, y)
     # alpha_abs decouples the penalty from the design scale. With the trace rule,
     # rescaling the spectrum to set `cond` also collapses trace(X'X), so alpha moves
@@ -189,15 +228,21 @@ def _run(n: int, d: int, targets: int, alpha_scale: float, cond: float,
     denom = max(float(np.abs(ref).max()), 1e-300)
     coef_rel = float(np.abs(got - ref).max()) / denom
 
+    global _FELL_BACK
+    coef_ok = bool(np.allclose(got, ref, atol=COEF_ATOL, rtol=COEF_RTOL))
     records.append({**cmp.as_dict(), "n": n, "d": d, "targets": targets, "cond": cond,
                     "alpha": alpha, "objective_rel": obj_rel, "coef_rel": coef_rel,
+                    "coef_ok": coef_ok, "fell_back": _FELL_BACK, "snr": snr,
                     "backend": "metal_gram", "baseline": baseline})
+    _FELL_BACK = False
     gate = "pass" if obj_rel < OBJECTIVE_RTOL else "FAIL"
     sig = "" if cmp.significant else "  (ns)"
     print(f"  n={n:<7} d={d:<5} t={targets:<3} cond={cond:<8g} "
           f"{cmp.mlxlearn.median_s * 1000:7.1f} vs {cmp.sklearn.median_s * 1000:7.1f} ms   "
           f"{cmp.speedup:5.2f}x med {cmp.speedup_best:5.2f}x best{sig}   "
-          f"obj {obj_rel:8.2e} [{gate}]  coef {coef_rel:8.2e}")
+          f"obj {obj_rel:8.2e} [{gate}]  coef {coef_rel:8.2e} "
+          f"[{'pass' if coef_ok else 'FAIL'}]"
+          + ("  FELL BACK" if _FELL_BACK else ""))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -211,12 +256,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=7)
     parser.add_argument("--baseline", default="sklearn_bare", choices=BACKENDS)
+    parser.add_argument("--snr", type=float, default=10.0,
+                        help="signal RMS over noise scale; held fixed across a cond sweep")
     parser.add_argument("--alpha-abs", type=float, default=None,
                         help="absolute penalty; decouples alpha from the design scale")
     parser.add_argument("--strict", action="store_true",
                         help="refuse to run on warnings too, not just blocking failures")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
+    if any(c < 1.0 for c in args.cond):
+        # Previously a value below 1 was silently ignored, because make_problem only
+        # rescaled when cond > 1, and the fabricated value was then printed and recorded
+        # as though it had been applied.
+        parser.error("--cond must be >= 1.0; a condition number below 1 is not meaningful")
 
     from benchmarks.ridge.preflight import preflight
 
@@ -234,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 _run(n, d, args.targets, args.alpha_scale, cond,
                      args.seed, args.iterations, records,
-                     baseline=args.baseline, alpha_abs=args.alpha_abs)
+                     baseline=args.baseline, alpha_abs=args.alpha_abs, snr=args.snr)
 
     if args.output:
         from benchmarks._harness import environment
@@ -249,9 +301,17 @@ def main(argv: list[str] | None = None) -> int:
                     {"name": c.name, "ok": c.ok, "value": c.value, "blocking": c.blocking}
                     for c in checks
                 ],
+                "gate_passed": all(
+                    r["objective_rel"] < OBJECTIVE_RTOL and r["coef_ok"] for r in records
+                ),
                 "results": records,
             }, handle, indent=2, sort_keys=True)
         print(f"\nwrote {len(records)} records to {args.output}")
+    failed = [r for r in records if r["objective_rel"] >= OBJECTIVE_RTOL or not r["coef_ok"]]
+    if failed:
+        print(f"\n{len(failed)}/{len(records)} cells outside a tolerance in "
+              f"docs/fp32_policy.md section 3")
+        return 1
     return 0
 
 

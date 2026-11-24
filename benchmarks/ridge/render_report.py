@@ -72,6 +72,7 @@ def _rows_vary(records: list[dict], key: str) -> bool:
 def render(path: Path) -> list[str]:
     payload = json.loads(path.read_text())
     records = payload.get("results", [])
+    rtol = payload.get("objective_rtol", OBJECTIVE_RTOL)
     if not records:
         return [f"*(no records in {path.name})*"]
 
@@ -82,18 +83,18 @@ def render(path: Path) -> list[str]:
         "",
     ]
     if by_cond:
-        head = "| cond(X) | alpha | Metal | " + baseline + " | median | best | significant | objective rel | gate |"
-        sep = "|---:|---:|---:|---:|---:|---:|---|---:|---|"
+        head = "| cond(X) | alpha | Metal | " + baseline + " | median | best | significant | objective rel | gate | coef rel |"
+        sep = "|---:|---:|---:|---:|---:|---:|---|---:|---|---:|"
     else:
-        head = "| n | d | Metal | " + baseline + " | median | best | significant | objective rel | gate |"
-        sep = "|---:|---:|---:|---:|---:|---:|---|---:|---|"
+        head = "| n | d | Metal | " + baseline + " | median | best | significant | objective rel | gate | coef rel |"
+        sep = "|---:|---:|---:|---:|---:|---:|---|---:|---|---:|"
     out += [head, sep]
 
     wins = sig = passes = 0
     for r in sorted(records, key=lambda r: (r.get("cond", 0), r.get("n", 0), r.get("d", 0))):
         obj = r.get("objective_rel", float("nan"))
-        gate = "pass" if obj < OBJECTIVE_RTOL else "**FAIL**"
-        passes += obj < OBJECTIVE_RTOL
+        gate = "pass" if obj < rtol else "**FAIL**"
+        passes += obj < rtol
         significant = r.get("significant", False)
         sig += bool(significant)
         wins += r.get("speedup", 0) > 1.0
@@ -104,19 +105,56 @@ def render(path: Path) -> list[str]:
             lead
             + f"| {_fmt(r['mlxlearn']['median_s'])} ms | {_fmt(r['sklearn']['median_s'])} ms "
             + f"| {spd} | {r['speedup_best']:.2f}x | {'yes' if significant else 'no'} "
-            + f"| {obj:.2e} | {gate} |"
+            + f"| {obj:.2e} | {gate} | {r.get('coef_rel', float('nan')):.2e}"
+            + ("" if r.get("coef_ok", True) else " **x**") + " |"
         )
 
     n = len(records)
     out += [
         "",
         f"{wins}/{n} cells above 1.0x, {sig}/{n} statistically significant, "
-        f"{passes}/{n} inside the {OBJECTIVE_RTOL:g} objective gate.",
+        f"{passes}/{n} inside the {rtol:g} objective gate.",
     ]
     sig_recs = [r for r in records if r.get("significant")]
     if not sig_recs:
         out.append("**No cell is statistically significant.** No speedup claim is supportable.")
         return out
+
+    # Per n, not pooled. Pooling takes max(loss d) from one n and min(win d) from another
+    # and prints a bracket supported at neither: this grid gives (128, 512) at n=8192 and
+    # (64, 256) at n=32768, which pooled reads as (128, 256).
+    brackets = []
+    for n in sorted({r.get("n") for r in sig_recs}):
+        rows = [r for r in sig_recs if r.get("n") == n]
+        losses = [r for r in rows if r["speedup"] < 1.0]
+        wins = [r for r in rows if r["speedup"] > 1.0]
+        if not (losses and wins):
+            continue
+        lo_d = max(r.get("d", 0) for r in losses)
+        hi_d = min(r.get("d", 0) for r in wins)
+        if lo_d >= hi_d:
+            # Wins and losses interleave in d, so no single threshold separates them.
+            brackets.append((n, None, None))
+        else:
+            brackets.append((n, lo_d, hi_d))
+
+    if not brackets:
+        sp = [r["speedup"] for r in sig_recs]
+        out.append(f"All significant cells on one side: {min(sp):.2f}x-{max(sp):.2f}x.")
+        return out
+
+    for n, lo_d, hi_d in brackets:
+        if lo_d is None:
+            out.append(f"n={n}: significant wins and losses **overlap in d**; no single "
+                       f"threshold is supported.")
+        else:
+            out.append(f"n={n}: significant losses up to d={lo_d}, significant wins from "
+                       f"d={hi_d} — **crossover in ({lo_d}, {hi_d})**.")
+    spans = [(lo, hi) for _, lo, hi in brackets if lo is not None]
+    if len(spans) > 1 and len(set(spans)) > 1:
+        out += ["", "The brackets differ by n, so the crossover is not a single d. Any "
+                    "dispatch rule needs both, as `Tuning`'s linreg fields already do."]
+    return out
 
     losses = [r for r in sig_recs if r["speedup"] < 1.0]
     wins = [r for r in sig_recs if r["speedup"] > 1.0]

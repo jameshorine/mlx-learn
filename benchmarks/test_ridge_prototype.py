@@ -58,14 +58,26 @@ def test_make_problem_produces_the_requested_condition_number(cond):
     assert s[0] / s[-1] == pytest.approx(cond, rel=1e-6)
 
 
-def test_make_problem_leaves_the_natural_scale_when_cond_is_one():
-    # The `cond > 1.0` branch is skipped, so this row keeps the Gaussian scale while
-    # every other row is normalised to sigma_max = 1. A sweep over cond therefore varies
-    # the data scale too, which is why conditioning claims from it were withdrawn.
-    X1, _ = make_problem(400, 20, 1, seed=0, cond=1.0)
-    X2, _ = make_problem(400, 20, 1, seed=0, cond=1e4)
-    assert np.linalg.svd(X1, compute_uv=False)[0] > 10.0
-    assert np.linalg.svd(X2, compute_uv=False)[0] == pytest.approx(1.0)
+def test_every_cond_row_has_the_same_design_scale():
+    # Previously the `cond > 1.0` branch was skipped at cond=1, leaving that row at the
+    # raw Gaussian scale while every other row was normalised to sigma_max = 1. A sweep
+    # then varied the design scale as well as the conditioning, which is why the earlier
+    # conditioning claims were withdrawn. Every row must now normalise identically.
+    for cond in (1.0, 1e2, 1e4, 1e8):
+        X, _ = make_problem(400, 20, 1, seed=0, cond=cond)
+        assert np.linalg.svd(X, compute_uv=False)[0] == pytest.approx(1.0)
+
+
+def test_signal_to_noise_is_held_fixed_across_a_cond_sweep():
+    # Noise used to be a literal 0.1 while X shrank with cond, so ill-conditioned rows
+    # were noise-dominated -- at cond=1e8, 97% of the objective was noise the
+    # coefficients cannot touch, which made the objective gate uninformative.
+    for cond in (1.0, 1e4, 1e8):
+        X, y = make_problem(2000, 16, 1, seed=0, cond=cond, snr=10.0)
+        signal = X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        resid = y - signal
+        got = float(np.sqrt((signal**2).mean()) / np.sqrt((resid**2).mean()))
+        assert got == pytest.approx(10.0, rel=0.35), f"snr drifted at cond={cond}"
 
 
 def test_make_problem_is_deterministic_in_its_seed():
@@ -200,19 +212,21 @@ def test_ridge_objective_is_minimised_by_the_ridge_solution():
         assert ridge_objective(X, y, nudged, alpha) >= best
 
 
-def test_alpha_abs_is_independent_of_the_design_scale():
-    # The withdrawn conditioning sweep used alpha = scale * trace(X'X)/d, and setting
-    # `cond` rescales the spectrum, so alpha moved 1.6-million-fold across it. An absolute
-    # alpha must not move with the design.
+def test_an_absolute_alpha_does_not_move_with_the_design():
     for cond in (1.0, 1e6):
         X, y = make_problem(300, 16, 1, seed=9, cond=cond)
-        coef = solve_normal_equations(*gram_host(X, y), 1.0)
-        assert np.all(np.isfinite(coef))
-    trace_based = [
+        assert np.all(np.isfinite(solve_normal_equations(*gram_host(X, y), 1.0)))
+
+
+def test_normalising_every_row_shrinks_the_trace_rule_confound():
+    # It cannot vanish -- compressing a spectrum necessarily lowers trace(X'X) -- but with
+    # sigma_max pinned it is orders of magnitude smaller than the 1.6e6 that invalidated
+    # the original sweep. --alpha-abs removes it entirely.
+    traces = [
         float(np.trace(gram_host(*make_problem(300, 16, 1, seed=9, cond=c))[0]))
         for c in (1.0, 1e6)
     ]
-    assert trace_based[0] / trace_based[1] > 1e3, "the trace rule really does move with cond"
+    assert traces[0] / traces[1] < 100.0, f"trace ratio still {traces[0] / traces[1]:.1f}"
 
 
 # ------------------------------------------------------------------- preflight
@@ -254,12 +268,51 @@ def _write(tmp_path, records, **extra):
     return p
 
 
+def test_render_brackets_the_crossover_per_n_rather_than_pooling(tmp_path):
+    # Pooling takes max(loss d) from one n and min(win d) from another and prints a
+    # bracket supported at neither. The real grid gives (128, 512) at n=8192 and
+    # (64, 256) at n=32768, which pooled reads as the unsupported (128, 256).
+    recs = [_record(n=8192, d=128, speedup=0.44), _record(n=8192, d=512, speedup=2.0),
+            _record(n=32768, d=64, speedup=0.41), _record(n=32768, d=256, speedup=1.2)]
+    text = "\n".join(render(_write(tmp_path, recs)))
+    assert "crossover in (128, 512)" in text
+    assert "crossover in (64, 256)" in text
+    assert "crossover in (128, 256)" not in text
+
+
+def test_render_refuses_a_bracket_when_wins_and_losses_interleave(tmp_path):
+    recs = [_record(n=8192, d=64, speedup=0.5), _record(n=8192, d=128, speedup=2.0),
+            _record(n=8192, d=256, speedup=0.5), _record(n=8192, d=512, speedup=2.0)]
+    text = "\n".join(render(_write(tmp_path, recs)))
+    assert "overlap in d" in text and "no single" in text
+
+
+def test_render_honours_the_artifacts_own_objective_rtol(tmp_path):
+    recs = [_record(objective_rel=5e-6)]
+    assert "pass" in "\n".join(render(_write(tmp_path, recs, objective_rtol=1e-5)))
+    assert "FAIL" in "\n".join(render(_write(tmp_path, recs, objective_rtol=1e-6)))
+
+
+def test_the_indefinite_fallback_is_bounded_not_merely_finite(tmp_path):
+    # The old assertion was only np.isfinite, which passes on [1, 1, -1e9]. sklearn's
+    # real fallback is _solve_svd on X, bounded by 1/(2*sqrt(alpha)) in every direction.
+    rng = np.random.default_rng(11)
+    X = rng.normal(size=(200, 6))
+    X[:, 5] = X[:, 4] + 1e-9 * rng.normal(size=200)      # near-collinear
+    y = rng.normal(size=(200, 1))
+    G = np.asarray(X, dtype=np.float64).T @ X
+    G[2, 2] = -1e-9                                       # force indefiniteness
+    alpha = 1e-6
+    out = solve_normal_equations(G, X.T @ y, alpha, X=X, y=y)
+    assert np.all(np.isfinite(out))
+    assert np.abs(out).max() < 1.0 / (2.0 * np.sqrt(alpha)), "fallback is unbounded"
+
+
 def test_render_reports_a_crossover_when_losses_and_wins_separate(tmp_path):
     recs = [_record(d=64, speedup=0.2), _record(d=128, speedup=0.5),
             _record(d=512, speedup=2.0), _record(d=1024, speedup=3.0)]
     text = "\n".join(render(_write(tmp_path, recs)))
-    assert "crossover is between d=128 and d=256" not in text  # 256 is not in this grid
-    assert "crossover is between d=128 and d=512" in text
+    assert "crossover in (128, 512)" in text
 
 
 def test_render_does_not_quote_a_range_spanning_losses_and_wins(tmp_path):
