@@ -213,9 +213,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--baseline", default="sklearn_bare", choices=BACKENDS)
     parser.add_argument("--alpha-abs", type=float, default=None,
                         help="absolute penalty; decouples alpha from the design scale")
+    parser.add_argument("--strict", action="store_true",
+                        help="refuse to run on warnings too, not just blocking failures")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
+    from benchmarks.ridge.preflight import preflight
+
+    checks = preflight(strict=args.strict)
+    print()
     print(f"Ridge: Metal float32 Gram + host float64 Cholesky vs "
           f"baseline={args.baseline}, "
           f"alpha = {args.alpha_abs if args.alpha_abs is not None else str(args.alpha_scale) + ' * trace/d'}")
@@ -239,6 +245,10 @@ def main(argv: list[str] | None = None) -> int:
                 "environment": environment(),
                 "parameters": vars(args),
                 "objective_rtol": OBJECTIVE_RTOL,
+                "preflight": [
+                    {"name": c.name, "ok": c.ok, "value": c.value, "blocking": c.blocking}
+                    for c in checks
+                ],
                 "results": records,
             }, handle, indent=2, sort_keys=True)
         print(f"\nwrote {len(records)} records to {args.output}")
