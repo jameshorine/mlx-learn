@@ -16,9 +16,7 @@ KNN also combines each shape with every query count (`q`).
 | Linear regression | Not benchmarked; experimental design not yet specified | Not specified |
 | PCA | Fit and transform; up to 32 components | Fit `n`: 1,000, 10,000, 50,000, 100,000; transform `n`: 10,000, 50,000, 100,000; `d`: 64, 256, 1,024 |
 | SVC | RBF fit and prediction | Fit `n`: 500, 2,000, 8,000, 32,000; prediction `n`: 2,000, 8,000; `d`: 16, 128 |
-| AR(p) | Not benchmarked; experimental design not yet specified | Not specified |
 | VAR(p) | Not benchmarked; experimental design not yet specified | Not specified |
-| Gaussian process regression (GPR) | Not benchmarked; experimental design not yet specified | Not specified |
 
 The existing grid and smaller smoke profile are in [`run.py`](run.py).
 Inputs are normally distributed; classification labels come from the first
