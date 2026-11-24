@@ -39,6 +39,7 @@ import numpy as np
 
 __all__ = [
     "OBJECTIVE_RTOL",
+    "BACKENDS",
     "gram_host",
     "gram_metal",
     "solve_normal_equations",
@@ -53,6 +54,11 @@ __all__ = [
 #: ill-conditioned design the coefficients are not determined by the data at all.
 OBJECTIVE_RTOL = 1e-5
 
+#: ``sklearn_bare`` is the fair baseline: scikit-learn's own `_solve_cholesky` with no
+#: estimator around it. ``sklearn`` keeps the full `Ridge.fit` so the overhead is visible
+#: as its own arm rather than folded into the Metal side's favour.
+BACKENDS = ("metal_gram", "host_gram", "sklearn_bare", "sklearn")
+
 
 def gram_host(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """``(X'X, X'y)`` in host float64."""
@@ -64,29 +70,46 @@ def gram_host(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def gram_metal(X: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """``(X'X, X'y)`` built in float32 on Metal, returned as float64.
 
-    Uses ``mlxlearn_device._binary32.float32_matmul``, which keeps binary32 products on
-    GPUs whose float32 matmul would otherwise round to TF32.
+    Uses ``mlxlearn_device._binary32.matmul``, the dispatching wrapper the library itself
+    uses: the binary32 kernel where float32 matmul would round to TF32, ``mx.matmul``
+    otherwise.
     """
     import mlx.core as mx
 
-    from mlxlearn_device._binary32 import float32_matmul
+    from mlxlearn_device._binary32 import matmul
 
     Xf = mx.array(np.ascontiguousarray(X, dtype=np.float32))
     yf = mx.array(np.ascontiguousarray(y, dtype=np.float32))
-    G = float32_matmul(Xf, Xf, transpose_a=True)
-    C = float32_matmul(Xf, yf, transpose_a=True)
+    # `matmul` is the dispatching wrapper: it uses the binary32 kernel only on GPU
+    # generations whose float32 matmul would round to TF32, and plain `mx.matmul`
+    # otherwise. Calling `float32_matmul` directly measures a path the shipped
+    # library would not take on this machine, and the slower one.
+    G = matmul(Xf, Xf, transpose_a=True)
+    C = matmul(Xf, yf, transpose_a=True)
     mx.eval(G, C)
     return np.array(G, dtype=np.float64), np.array(C, dtype=np.float64)
 
 
 def solve_normal_equations(G: np.ndarray, C: np.ndarray, alpha: float) -> np.ndarray:
-    """``(G + alpha I)^-1 C`` by float64 Cholesky. Does not mutate ``G``."""
+    """``(G + alpha I)^-1 C`` by float64 Cholesky, falling back as scikit-learn does.
+
+    Does not mutate ``G``.
+    """
     import scipy.linalg as sla
 
     G = np.array(G, dtype=np.float64, copy=True)
     if alpha:
         G[np.diag_indices_from(G)] += alpha
-    return sla.solve(G, np.asarray(C, dtype=np.float64), assume_a="pos")
+    C = np.asarray(C, dtype=np.float64)
+    try:
+        return sla.solve(G, C, assume_a="pos")
+    except np.linalg.LinAlgError:
+        # A float32 Gram can be indefinite where the float64 one is not: measured
+        # lambda_min = -1.315e-08 at n=32768, d=512, cond=1e12 against +1.905e-08 in
+        # float64. scikit-learn degrades rather than failing here -- `_ridge_regression`
+        # catches the same error and retries with solver="svd" (sklearn/linear_model/
+        # _ridge.py:748-752) -- so a benchmark that crashes is not comparing like for like.
+        return np.linalg.lstsq(G, C, rcond=None)[0]
 
 
 def make_problem(n: int, d: int, targets: int, seed: int, *, cond: float = 1.0):
@@ -123,25 +146,43 @@ def fit_ridge(X: np.ndarray, y: np.ndarray, alpha: float, *, backend: str) -> np
 
         est = Ridge(alpha=alpha, solver="cholesky", fit_intercept=False).fit(X, y)
         return np.atleast_2d(est.coef_).T
+    if backend == "sklearn_bare":
+        # scikit-learn's linear algebra with none of its estimator around it.
+        # `Ridge.fit` runs `validate_data`/`check_array` on X and y, then
+        # `_preprocess_data(copy=self.copy_X)` runs a SECOND `check_array` with
+        # `copy=True` -- a full float64 copy of X. Timing that against a bare
+        # `gram_metal` + solve, which validates nothing, is not like for like, and the
+        # gap is largest at small d where the algebra is cheapest.
+        from sklearn.linear_model._ridge import _solve_cholesky
+
+        y2 = np.asarray(y, dtype=np.float64)
+        y2 = y2.reshape(-1, 1) if y2.ndim == 1 else y2
+        return _solve_cholesky(np.asarray(X, dtype=np.float64), y2,
+                               np.full(y2.shape[1], float(alpha))).T
     raise ValueError(f"unknown backend {backend!r}")
 
 
 def _run(n: int, d: int, targets: int, alpha_scale: float, cond: float,
-         seed: int, iterations: int, records: list[dict]) -> None:
+         seed: int, iterations: int, records: list[dict], *,
+         baseline: str = "sklearn_bare", alpha_abs: float | None = None) -> None:
     from benchmarks._harness import compare
 
     X, y = make_problem(n, d, targets, seed, cond=cond)
     G, _ = gram_host(X, y)
-    alpha = alpha_scale * float(np.trace(G)) / d
+    # alpha_abs decouples the penalty from the design scale. With the trace rule,
+    # rescaling the spectrum to set `cond` also collapses trace(X'X), so alpha moves
+    # with it -- measured 3.27e-02 -> 2.00e-08 across cond 1..1e12, a 1.6-million-fold
+    # change. A sweep using it varies two things at once and is not a conditioning sweep.
+    alpha = alpha_abs if alpha_abs is not None else alpha_scale * float(np.trace(G)) / d
 
     cmp = compare(
         lambda: fit_ridge(X, y, alpha, backend="metal_gram"),
-        lambda: fit_ridge(X, y, alpha, backend="sklearn"),
+        lambda: fit_ridge(X, y, alpha, backend=baseline),
         label=f"ridge/n{n}/d{d}/t{targets}/cond{cond:g}",
         shape=(n, d),
         iterations=iterations,
     )
-    ref = fit_ridge(X, y, alpha, backend="sklearn")
+    ref = fit_ridge(X, y, alpha, backend=baseline)
     got = fit_ridge(X, y, alpha, backend="metal_gram")
     j_ref, j_got = ridge_objective(X, y, ref, alpha), ridge_objective(X, y, got, alpha)
     obj_rel = abs(j_got - j_ref) / abs(j_ref)
@@ -150,7 +191,7 @@ def _run(n: int, d: int, targets: int, alpha_scale: float, cond: float,
 
     records.append({**cmp.as_dict(), "n": n, "d": d, "targets": targets, "cond": cond,
                     "alpha": alpha, "objective_rel": obj_rel, "coef_rel": coef_rel,
-                    "backend": "metal_gram", "baseline": "sklearn_ridge"})
+                    "backend": "metal_gram", "baseline": baseline})
     gate = "pass" if obj_rel < OBJECTIVE_RTOL else "FAIL"
     sig = "" if cmp.significant else "  (ns)"
     print(f"  n={n:<7} d={d:<5} t={targets:<3} cond={cond:<8g} "
@@ -162,17 +203,22 @@ def _run(n: int, d: int, targets: int, alpha_scale: float, cond: float,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, nargs="+", default=[8192, 32768])
-    parser.add_argument("--d", type=int, nargs="+", default=[64, 128, 256, 512, 1024])
+    parser.add_argument("--d", type=int, nargs="+",
+                        default=[64, 128, 256, 512, 1024, 2048])
     parser.add_argument("--targets", type=int, default=1)
     parser.add_argument("--cond", type=float, nargs="+", default=[1.0])
     parser.add_argument("--alpha-scale", type=float, default=1e-6)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--iterations", type=int, default=7)
+    parser.add_argument("--baseline", default="sklearn_bare", choices=BACKENDS)
+    parser.add_argument("--alpha-abs", type=float, default=None,
+                        help="absolute penalty; decouples alpha from the design scale")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
     print(f"Ridge: Metal float32 Gram + host float64 Cholesky vs "
-          f"sklearn Ridge(solver='cholesky'), alpha = {args.alpha_scale:g} * trace(X'X)/d")
+          f"baseline={args.baseline}, "
+          f"alpha = {args.alpha_abs if args.alpha_abs is not None else str(args.alpha_scale) + ' * trace/d'}")
     print(f"objective gate: rtol < {OBJECTIVE_RTOL:g}  (docs/fp32_policy.md s3)")
     records: list[dict] = []
     for cond in args.cond:
@@ -181,7 +227,8 @@ def main(argv: list[str] | None = None) -> int:
                 if d >= n:
                     continue
                 _run(n, d, args.targets, args.alpha_scale, cond,
-                     args.seed, args.iterations, records)
+                     args.seed, args.iterations, records,
+                     baseline=args.baseline, alpha_abs=args.alpha_abs)
 
     if args.output:
         from benchmarks._harness import environment
