@@ -197,5 +197,5 @@ coefficients that are equally good."
 
 Vector autoregression has no scikit-learn counterpart, so none of this can be registered
 in `patching/_registry.py`, and gate 6 has no stock estimator to pair against. See issue
-[#4](https://github.com/jameshorine/mlx-learn/issues/4) — the scope question is the
+the VAR scope issue (#4) — the scope question is the
 blocker, not the performance case.
