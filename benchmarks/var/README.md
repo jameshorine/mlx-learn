@@ -196,6 +196,5 @@ coefficients that are equally good."
 ## Scope
 
 Vector autoregression has no scikit-learn counterpart, so none of this can be registered
-in `patching/_registry.py`, and gate 6 has no stock estimator to pair against. See issue
-the VAR scope issue (#4) — the scope question is the
-blocker, not the performance case.
+in `patching/_registry.py`, and gate 6 has no stock estimator to pair against. See the
+VAR scope issue (#4): the scope question is the blocker, not the performance case.
