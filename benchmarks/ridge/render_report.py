@@ -22,13 +22,18 @@ from pathlib import Path
 OBJECTIVE_RTOL = 1e-5
 
 
-def _blas(env: dict) -> str:
+def _blas(env: dict, preflight: list | None = None) -> str:
     """The BLAS line, or a warning that the artifact does not record one.
 
     The first Ridge campaign was invalidated by numpy linking OpenBLAS built for
     ``neoversen1``, an ARM server core that never reaches the AMX coprocessor, and
     nothing in the recorded output said so.
     """
+    # The driver's own preflight records it; upstream `environment()` does not yet.
+    for c in preflight or []:
+        if c.get("name") == "blas":
+            v = c.get("value", "?")
+            return v if c.get("ok") else f"**{v} — not Accelerate; numbers are not trustworthy**"
     pools = env.get("threadpools")
     if not pools or isinstance(pools, str):
         return "**BLAS not recorded in this artifact** — see the to-do in README.md"
@@ -42,7 +47,7 @@ def _blas(env: dict) -> str:
     return line
 
 
-def _env_block(env: dict) -> list[str]:
+def _env_block(env: dict, preflight: list | None = None) -> list[str]:
     cpu = env.get("cpu", "?")
     cores = env.get("cores", "?")
     mem = env.get("memory_bytes")
@@ -52,7 +57,7 @@ def _env_block(env: dict) -> list[str]:
         f"scikit-learn {env.get('sklearn','?')}, SciPy {env.get('scipy','?')}, "
         f"NumPy {env.get('numpy','?')}.",
         "",
-        f"BLAS: {_blas(env)}",
+        f"BLAS: {_blas(env, preflight)}",
     ]
 
 
@@ -108,15 +113,30 @@ def render(path: Path) -> list[str]:
         f"{wins}/{n} cells above 1.0x, {sig}/{n} statistically significant, "
         f"{passes}/{n} inside the {OBJECTIVE_RTOL:g} objective gate.",
     ]
-    if sig:
-        sig_speeds = [r["speedup"] for r in records if r.get("significant")]
-        out.append(
-            f"Range across significant cells only: {min(sig_speeds):.2f}x–{max(sig_speeds):.2f}x. "
-            f"Quoting a range that includes non-significant cells overstates the result, since "
-            f"`benchmarks/gate.py` classifies those as within noise."
-        )
-    else:
+    sig_recs = [r for r in records if r.get("significant")]
+    if not sig_recs:
         out.append("**No cell is statistically significant.** No speedup claim is supportable.")
+        return out
+
+    losses = [r for r in sig_recs if r["speedup"] < 1.0]
+    wins = [r for r in sig_recs if r["speedup"] > 1.0]
+    if losses and wins:
+        # A single range spanning both sides says nothing useful. The boundary does.
+        worst = min(losses, key=lambda r: r["speedup"])
+        best = max(wins, key=lambda r: r["speedup"])
+        lo_d = max(r.get("d", 0) for r in losses)
+        hi_d = min(r.get("d", 0) for r in wins)
+        out += [
+            f"Significant **losses** up to d={lo_d} (worst {worst['speedup']:.2f}x at "
+            f"n={worst.get('n')}, d={worst.get('d')}); significant **wins** from d={hi_d} "
+            f"(best {best['speedup']:.2f}x at n={best.get('n')}, d={best.get('d')}).",
+            "",
+            f"**The crossover is between d={lo_d} and d={hi_d}.** Quoting one range across "
+            f"both sides would be meaningless: this is a dispatch threshold, not a speedup.",
+        ]
+    else:
+        sp = [r["speedup"] for r in sig_recs]
+        out.append(f"Range across significant cells: {min(sp):.2f}x-{max(sp):.2f}x.")
     return out
 
 
@@ -126,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     first = json.loads(args.results[0].read_text())
-    lines = _env_block(first.get("environment", {})) + [""]
+    lines = _env_block(first.get("environment", {}), first.get("preflight")) + [""]
     for path in args.results:
         lines += render(path) + [""]
     print("\n".join(lines))

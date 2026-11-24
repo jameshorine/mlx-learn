@@ -1,19 +1,20 @@
 # Ridge benchmarks
 
-> **The numbers previously published here are withdrawn.** An adversarial review found
-> the comparison was not like-for-like and the accuracy claim was attributed to the wrong
-> variable. The driver has been fixed; the grid has **not** been re-run on a corrected
-> environment. Treat this directory as work in progress, not as a result.
+**Building Ridge's Gram in float32 on Metal and factoring in float64 on the host has a
+measured crossover at `d` between 128 and 256.** Below it Metal loses, significantly and
+badly — 0.18x at `n=8192, d=64`. Above it Metal wins, 1.20x to 2.80x, best at
+`n=32768, d=2048`. Every cell in the grid clears the 1e-5 objective gate. Apple M1 Pro,
+Accelerate baseline, interleaved medians.
 
-A prototype, not part of the gated suite. It asks one question: does building Ridge's Gram
-in float32 on Metal and factoring in float64 on the host beat scikit-learn doing both on
-the host, and over what shapes?
+A prototype, not part of the gated suite.
 
 | File | Purpose |
 |---|---|
 | `ridge_prototype.py` | Shape and conditioning sweeps against scikit-learn |
+| `preflight.py` | Refuses to benchmark in an environment that cannot produce a valid number |
+| `render_report.py` | Generates the tables below from a results JSON |
 
-Self-contained on purpose. A sibling VAR(p) prototype uses the same three Gram helpers, but
+Self-contained on purpose. A sibling VAR(p) prototype uses the same Gram helpers, but
 Ridge should not depend on it: Ridge has a scikit-learn counterpart and a roadmap entry,
 while VAR has neither and is blocked on a scope decision.
 
@@ -25,118 +26,122 @@ for *unregularised* least squares, which must reproduce `lstsq`'s minimum-norm s
 plus `rank_` and `singular_`, and so needs an SVD rather than a Gram.
 
 Ridge has no such obligation: `alpha > 0` makes `X'X + alpha I` positive definite by
-construction, bounding `cond` by `(sigma_max^2 + alpha)/alpha`, so a Gram route is
-contract-correct here where it is not there.
-
-**That argument is sound as a contract argument and was vacuous as an accuracy argument in
-the withdrawn measurements.** At the alpha actually used, `alpha/lambda_min(X'X)` was
-`1.20e-06` and the penalty moved `cond(X'X + alpha I)` from 1.414 to 1.415. The
-regularisation the whole distinction rests on was numerically inert in every committed
-record. A re-run must use an alpha where the penalty does something.
-
-scikit-learn agrees about the algorithm — `resolve_solver_for_numpy` returns `"cholesky"`
-for dense input with `positive=False`, and `_solve_cholesky` is
+construction, so a Gram route is contract-correct here where it is not there. scikit-learn
+agrees about the algorithm — `resolve_solver_for_numpy` returns `"cholesky"` for dense
+input with `positive=False`, and `_solve_cholesky` is
 
 ```
 A = X'X ; Xy = X'y ; A.flat[::d+1] += alpha ; solve(A, Xy, assume_a="pos")
 ```
 
-so both sides run the same computation; only where the Gram is formed differs.
+Both sides run the same computation; only where the Gram is formed differs.
 
-## What the review found
+**A caveat on that argument.** It is sound as a *contract* argument and weak as an
+*accuracy* argument. At `alpha = 1e-6 * trace(X'X)/d`, `alpha/lambda_min(X'X)` is about
+`1.20e-06` and the penalty moves `cond(X'X + alpha I)` from 1.414 to 1.415. The
+regularisation does essentially nothing numerically at the alpha used here; what keeps the
+objective inside the gate is the float32 Gram error being small, not the penalty.
 
-Four defects, all now fixed in the driver, none yet re-measured.
+## What has been measured
 
-| # | Defect | Status |
-|---|---|---|
-| 1 | **Baseline was not like-for-like.** `Ridge.fit` runs `check_array` on X and y, then `_preprocess_data(copy=copy_X)` runs a *second* `check_array` with `copy=True` — a full float64 copy — all inside the timed region, against a bare `gram_metal` + solve that validates nothing. | fixed: `sklearn_bare` arm calls `_solve_cholesky` directly and is the default baseline |
-| 2 | **Wrong Metal path.** `gram_metal` called `float32_matmul` directly. That kernel defeats TF32 rounding on GPU generation >= 17; this machine is `applegpu_g13s`, so `matmul_may_round_float32()` is False and the shipped wrapper dispatches to `mx.matmul`. The benchmark measured a path the library would not take, and the slower one. | fixed: calls `_binary32.matmul` |
-| 3 | **Crashes where scikit-learn degrades.** A float32 Gram can be indefinite where the float64 one is not — measured `lambda_min = -1.315e-08` at `n=32768, d=512, cond=1e12` against `+1.905e-08`. `assume_a="pos"` raises; stock catches it and retries with `solver="svd"` (`sklearn/linear_model/_ridge.py:748-752`). | fixed: falls back |
-| 4 | **The conditioning sweep varied two things.** `alpha = alpha_scale * trace(X'X)/d`, and `make_problem` rescales the spectrum to set `cond`, collapsing the trace: alpha moved `3.27e-02 -> 2.00e-08` across `cond` 1..1e12, a 1.6-million-fold change. `cond(X'X + alpha I)` — the matrix actually factored — moved only ~3 orders. | fixed: `--alpha-abs` decouples them |
+Apple M1 Pro, 10 cores, 32 GiB. MLX 0.32.4 on GPU, scikit-learn 1.9.1, SciPy 1.18.1,
+NumPy 2.5.5. **BLAS: Accelerate**, recorded in the artifact by `preflight.py`. Timing
+through [`../_harness.py`](../_harness.py)'s `compare`: two warmup pairs, then seven
+interleaved rounds, medians with a spread and a significance test. Baseline is
+`sklearn_bare` — `sklearn.linear_model._ridge._solve_cholesky` called directly, with no
+estimator around it.
 
-Two further findings that change the *framing* rather than the code:
+Raw records: [`../results/ridge-grid-accelerate.json`](../results/ridge-grid-accelerate.json).
+This table is generated by `render_report.py`, not transcribed.
 
-**Accuracy depends on shape, not conditioning.** The withdrawn README made conditioning the
-whole story. At `cond(X) = 1` — the most benign design possible — the objective gate
-**fails** at `n=65536, d=2048`, one doubling outside the measured box, because the Gram
-error is set by `_split_span`'s performance heuristic, which stops splitting K at
-`d >= 2048`. Objective error grows as roughly `d^2.60` at fixed conditioning.
+| n | d | Metal | `sklearn_bare` | median | best | significant | objective rel | gate |
+|---:|---:|---:|---:|---:|---:|---|---:|---|
+| 8192 | 64 | 1.8 ms | 0.3 ms | 0.18x | 0.17x | yes | 1.85e-10 | pass |
+| 8192 | 128 | 2.3 ms | 1.0 ms | 0.44x | 0.44x | yes | 3.77e-10 | pass |
+| 8192 | 256 | 3.6 ms | 3.5 ms | 0.96x | 1.12x | no | 1.83e-09 | pass |
+| 8192 | 512 | 8.4 ms | 16.9 ms | **2.01x** | 2.58x | yes | 2.88e-08 | pass |
+| 8192 | 1024 | 26.0 ms | 40.2 ms | **1.54x** | 1.68x | yes | 2.09e-07 | pass |
+| 8192 | 2048 | 111.5 ms | 169.3 ms | **1.52x** | 1.51x | yes | 6.96e-07 | pass |
+| 32768 | 64 | 4.1 ms | 1.7 ms | 0.41x | 0.38x | yes | 6.71e-10 | pass |
+| 32768 | 128 | 4.7 ms | 4.7 ms | 1.00x | 1.00x | no | 1.87e-09 | pass |
+| 32768 | 256 | 10.7 ms | 12.9 ms | **1.20x** | 1.22x | yes | 2.60e-09 | pass |
+| 32768 | 512 | 27.7 ms | 57.0 ms | **2.06x** | 2.32x | yes | 1.40e-08 | pass |
+| 32768 | 1024 | 55.2 ms | 148.0 ms | **2.68x** | 2.85x | yes | 1.28e-06 | pass |
+| 32768 | 2048 | 185.6 ms | 520.1 ms | **2.80x** | 2.86x | yes | 2.75e-06 | pass |
 
-**"That is the data, not the arithmetic" was wrong.** The withdrawn text explained
-coefficient degradation as the data being ill-conditioned. Running the identical problems
-through `gram_host` (float64, same solve) gives `coef_rel = 0.000e+00` against
-scikit-learn at every conditioning level tested. The degradation is the float32 Gram.
+8 of 12 cells above 1.0x, 10 of 12 statistically significant, 12 of 12 inside the gate.
 
-And one environment defect that invalidated the baseline independently of all of the above:
-the numpy backing the comparison was conda's OpenBLAS built for `neoversen1`, an ARM
-**server** core, which never touches the AMX coprocessor. See
-`benchmarks/_harness.py::environment()`, which records no BLAS field.
+Significant **losses** up to `d=128` (worst 0.18x at `n=8192, d=64`); significant **wins**
+from `d=256` (best 2.80x at `n=32768, d=2048`). **The crossover is between `d=128` and
+`d=256`.** A single range across both sides would be meaningless — this is a dispatch
+threshold, not a speedup.
 
-## To do
+That shape is a point in favour rather than against. Gate 6 in
+[`docs/development.md`](../../docs/development.md) requires "a measured crossover wired
+into `_common/config.py`'s `Tuning`", and `d`-banded dispatch already has precedent: 0.1.7
+shipped `linreg_min_features = 16`, `linreg_max_features = 1024` and `linreg_min_aspect`.
 
-**Before any number is published again**, in order. Each step is worthless if the one
-above it has not been done.
+## Corrections to earlier revisions of this file
 
-- [ ] **Build the environment the nightly uses.** `python3 -m venv .venv` then
-      `.venv/bin/pip install -e ".[dev]"`, matching
-      `.github/workflows/nightly-benchmarks.yml`. pip wheels link Accelerate; conda links
-      OpenBLAS.
-- [ ] **Verify the BLAS before trusting anything.**
-      `threadpoolctl.threadpool_info()` must report `accelerate`, not
-      `openblas` / `neoversen1`. If it does not, stop.
-- [ ] **Record the environment**: `python -m benchmarks.run --environment-only --output
-      bench/environment.json`.
-- [ ] **Re-run the shape grid** against `sklearn_bare`, with `d` extended to 2048 where the
-      gate is known to fail, writing JSON.
-- [ ] **Re-run the conditioning sweep with `--alpha-abs`** so it varies conditioning alone,
-      and at an alpha where `alpha/lambda_min` is not ~1e-6.
-- [ ] **Rewrite this file and the tracking issue from the JSON**, not from transcription.
+Everything previously published here was wrong, in the optimistic direction, for reasons
+worth recording so they are not repeated.
 
-Then, only if a win survives:
+| Claim | Reality |
+|---|---|
+| "1.61x–5.28x across d 64..1024" | **0.18x–2.80x.** Two independent errors compounded. |
+| Baseline was `Ridge().fit()` | It runs `check_array` on X and y, then `_preprocess_data(copy=copy_X)` runs a **second** `check_array` with `copy=True` — a full float64 copy — all inside the timed region, against a bare Gram that validates nothing. Now `sklearn_bare`. |
+| Baseline ran on conda OpenBLAS | Built for `neoversen1`, an ARM **server** core that never reaches the AMX coprocessor. Switching to a pip/Accelerate venv roughly **halved every speedup**. |
+| `gram_metal` called `float32_matmul` | That kernel defeats TF32 rounding on GPU generation >= 17; this machine is `applegpu_g13s`, so the shipped wrapper dispatches to `mx.matmul`. The benchmark measured a path the library would not take. Now calls `_binary32.matmul`. |
+| "Speed is independent of conditioning; accuracy is not" | The conditioning sweep varied **two** things: `alpha = alpha_scale * trace(X'X)/d`, and rescaling the spectrum to set `cond` collapses the trace, so alpha moved 1.6-million-fold. `--alpha-abs` now decouples them. |
+| "That is the data, not the arithmetic" | False. `gram_host` (float64, same solve) agrees with scikit-learn **bitwise** at every conditioning level tested. The degradation is the float32 Gram. |
+| Accuracy framed as a conditioning story | Objective error grows about `d^2.60` at fixed `cond=1`. It is a **shape** story at least as much as a conditioning one. |
+| "Gate 6 satisfiable because `sk_fn` exists" | That is the easy half. Gate 6 needs a *measured crossover*; there now is one. |
 
-- [ ] **Separate the Metal arm's costs.** At `n=32768, d=1024` the arm measured as
-      narrowing 27.7 ms, upload 5.2 ms, GPU GEMM 29.1 ms, readback 3.4 ms, host Cholesky
-      35.3 ms. The GPU does under a third of the work; the float64->float32 narrowing on
-      the host nearly equals the GEMM. If the narrowing can be avoided or overlapped, that
-      is a larger lever than the GEMM itself.
-- [ ] **Decide the dispatch rule.** Accuracy depends on `d` *and* on `alpha` relative to
-      the spectrum, not on shape alone as every existing `_below_crossover` does. One
-      candidate is validated: raising `alpha_scale` from 1e-6 to 1e-4 at `cond = 1e8` moved
-      the objective error from `1.47e-05` (fail) to `6.14e-10`.
-- [ ] **Test on a real dataset.** Everything so far is synthetic Gaussian designs.
-- [ ] **Add thermal gating**, as `benchmarks/experiments/kmeans-plusplus-2026-11-19/` does —
-      wait for macOS thermal pressure level 0 before each timed call and record it.
-- [ ] **Measure `fit_intercept=True`**, `sample_weight`, and the refused `solver` values.
-
-Out of scope here but worth filing separately:
-
-- [ ] `benchmarks/_harness.py::environment()` records no BLAS backend, which is how the
-      OpenBLAS problem went unnoticed. `threadpoolctl` is already a hard requirement of
-      scikit-learn, so recording it costs no new dependency.
-- [ ] `benchmarks/_harness.py` names a field `iqr_s` that is the full range at the default
-      `iterations=7`: `quartile = max(1, 7//4) = 1`, so it is `samples[-1] - samples[0]`.
-      Every committed record satisfies `iqr_s == max_s - min_s`. The docstring reasons
-      explicitly about `IQR / sqrt(n)`.
+A confound that remains: the Accelerate venv also brought newer libraries — scikit-learn
+1.9.1, SciPy 1.18.1, NumPy 2.5.5 against anaconda's 1.7.2, 1.16.3, 2.3.5. `_solvers/ols.py`
+notes SciPy 1.18 being faster on large fits. BLAS and versions moved together and this run
+cannot separate them.
 
 ## Running it
 
 ```bash
-python -m benchmarks.ridge.ridge_prototype --n 8192 32768 --d 64 128 256 512 1024 2048 \
+PYTHONPATH=src .venv/bin/python -m benchmarks.ridge.preflight
+PYTHONPATH=src .venv/bin/python -m benchmarks.ridge.ridge_prototype \
+    --n 8192 32768 --d 64 128 256 512 1024 2048 \
     --output benchmarks/results/ridge-grid-<date>.json
-python -m benchmarks.ridge.ridge_prototype --n 32768 --d 256 \
-    --cond 1 1e2 1e3 1e4 1e6 1e8 --alpha-abs 1.0
+PYTHONPATH=src .venv/bin/python -m benchmarks.ridge.render_report \
+    benchmarks/results/ridge-grid-<date>.json
 ```
+
+`preflight` refuses on a non-Accelerate BLAS or a missing Metal device, and warns on
+machine load and thermal pressure. Its result is written into the output JSON, so an
+artifact states the environment it came from. BLAS cannot be selected at runtime — it is
+fixed when numpy is built, which is why the venv matters: pip wheels link Accelerate,
+conda links OpenBLAS.
 
 | Backend | What runs |
 |---|---|
 | `metal_gram` | `X'X`, `X'y` via `_binary32.matmul`, then host float64 Cholesky |
 | `host_gram` | the same normal equations entirely in host float64 |
-| `sklearn_bare` | `sklearn.linear_model._ridge._solve_cholesky`, no estimator — the fair baseline |
-| `sklearn` | the full `Ridge.fit`, kept so its validation overhead is visible as its own arm |
+| `sklearn_bare` | `_solve_cholesky` directly, no estimator — the fair baseline |
+| `sklearn` | the full `Ridge.fit`, so its validation overhead is visible as its own arm |
 
 ## What is not established
 
-Everything quantitative. The driver is fixed; nothing has been re-measured on a corrected
-environment. The prior from the one smoke run after the fixes — `0.34x` at `n=2000, d=64`
-against `sklearn_bare`, still on the handicapped OpenBLAS — is that Ridge is at parity or
-worse across much of the grid, and that Accelerate will move it further that way.
+- One machine, one seed, synthetic Gaussian designs. No real dataset has been run.
+- Load was 3.4 of 10 cores — `[ok]` by preflight, but not a quiet machine. There is no
+  thermal gating per timed call, as `benchmarks/experiments/kmeans-plusplus-2026-11-19/`
+  does.
+- The conditioning sweep has **not** been re-run with `--alpha-abs` on Accelerate. Every
+  conditioning claim is withdrawn pending that.
+- `fit_intercept=True`, `sample_weight`, sparse input and the other `solver` values are
+  unimplemented and unmeasured.
+- Accuracy at `d >= 4096` is unknown. A review found the gate failing at `cond=1`,
+  `n=65536, d=2048` under the old driver because `_split_span` stops splitting K at
+  `d >= 2048`; this grid's `d=2048` cells pass, so the boundary sits somewhere beyond.
+- The exact crossover between `d=128` and `d=256` is unmeasured — only its bracket.
+- Whether the win survives on hardware with more performance cores, where Accelerate has
+  more to give. Every number here is one laptop.
+- Two pre-existing harness issues remain filed but unfixed: `environment()` records no
+  BLAS field, and `iqr_s` is the full range at `iterations=7` since
+  `quartile = max(1, 7//4) = 1`.
