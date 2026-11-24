@@ -13,7 +13,7 @@ KNN also combines each shape with every query count (`q`).
 |---|---|---|
 | KNN | Fit and `kneighbors`; 10 neighbors; sklearn brute force | `n`: 500–512,000 (6 sizes); `d`: 8, 64, 768; `q`: 1, 256, 4,096 |
 | Logistic regression | Fit; `max_iter=200` | `n`: 1,000, 10,000, 100,000, 500,000; `d`: 16, 128, 1,024 |
-| Linear regression | Not benchmarked; experimental design not yet specified | Not specified |
+| Linear regression | Fit; dense OLS | `n`: 2,000, 16,000, 64,000, 256,000; `d`: 16, 128, 1,024 |
 | PCA | Fit and transform; up to 32 components | Fit `n`: 1,000, 10,000, 50,000, 100,000; transform `n`: 10,000, 50,000, 100,000; `d`: 64, 256, 1,024 |
 | SVC | RBF fit and prediction | Fit `n`: 500, 2,000, 8,000, 32,000; prediction `n`: 2,000, 8,000; `d`: 16, 128 |
 | VAR(p) | Not benchmarked; experimental design not yet specified | Not specified |
