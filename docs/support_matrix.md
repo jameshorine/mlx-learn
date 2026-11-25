@@ -67,6 +67,7 @@ The latest release benchmarks use MLX 0.32.4.
 | `neighbors.RadiusNeighborsRegressor` | 0.1.7 | exact Euclidean radius search, uniform or distance-weighted means | same as the radius classifier |
 | `linear_model.LogisticRegression` | 0.1.0 | L-BFGS, L2 / unpenalized | `l1`/`elasticnet`, non-`lbfgs` solvers, `dual=True`, sparse, `warm_start` |
 | `linear_model.LinearRegression` | 0.1.7 | dense host OLS with rank certification, multi-output and `sample_weight` | `positive=True`, sparse inputs, and automatic patched fits outside the [measured size and dtype ranges](linear-regression-2026-11-22.md#routing) |
+| `linear_model.Ridge` | unreleased, Layer 1 only | dense normal equations in float64 on the host: the primal Gram when `n_features <= n_samples`, the dual kernel otherwise, as scikit-learn routes them. Multi-output and `sample_weight` | `positive=True`, sparse input, `solver` other than `auto`/`cholesky`, and a per-target `alpha` whose entries differ |
 | `svm.SVC` | 0.1.0 | exact SMO, linear/poly/rbf/sigmoid | `kernel="precomputed"`, callable kernels, `probability=True`, sparse |
 | `decomposition.PCA` | 0.1.2 | dense covariance and randomized PCA, CPU/GPU projection | sparse input, values outside float32 range |
 
@@ -103,9 +104,15 @@ graph helper inputs continue to work for those variants.
 | | |
 |---|---|
 | `SVR`, `NuSVR`, `NuSVC` | Deferred. They will ship when they implement their true objectives. The ancestor patched `SVR` with a ridge surrogate, so `sklearn.svm.SVR` solved a different optimization problem than its name promises. |
-| `Ridge`, `Lasso`, `ElasticNet`, `KMeans`, `DBSCAN`, `TSNE` | Planned for 0.2.x, after `0.1.0a1` feedback. |
+| `Lasso`, `ElasticNet`, `KMeans`, `DBSCAN`, `TSNE` | Planned for 0.2.x, after `0.1.0a1` feedback. |
 | Tree ensembles (`RandomForest*`, `ExtraTrees*`) | Out of scope. |
 | `EmpiricalCovariance`, `DummyRegressor`, `LocalOutlierFactor` | Out of scope — the ancestor registered these as pass-throughs that added no acceleration. |
+
+`Ridge` is **not** in `patching/_registry.py`, so `patch_sklearn()` leaves
+`sklearn.linear_model.Ridge` alone and the class is reached by explicit import. An
+estimator is registered only after all six gates in [`development.md`](development.md)
+pass, and gate 6 wants a measured crossover wired into `Tuning`; no such measurement
+exists on fixed hardware yet.
 
 ## Array boundary
 

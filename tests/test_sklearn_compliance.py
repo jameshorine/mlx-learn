@@ -26,7 +26,7 @@ import pytest
 from sklearn.utils.estimator_checks import check_estimator
 
 from mlxlearn.decomposition import PCA
-from mlxlearn.linear_model import LinearRegression, LogisticRegression
+from mlxlearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from mlxlearn.neighbors import (
     KNeighborsClassifier,
     KNeighborsRegressor,
@@ -54,6 +54,9 @@ INHERITED_FAILURES: dict[str, set[str]] = {
         "check_sample_weight_equivalence_on_dense_data",
         "check_sample_weight_equivalence_on_sparse_data",
     },
+    # scikit-learn's own reason: "n_iter_ cannot be easily accessed." Ridge reports
+    # n_iter_ = None for the direct solvers, and the check compares it against 1.
+    "Ridge": {"check_non_transformer_estimators_n_iter"},
 }
 
 #: (estimator class name, check name) -> "RULE: justification", for checks
@@ -72,6 +75,7 @@ LAYER1 = [
     RadiusNeighborsClassifier,
     RadiusNeighborsRegressor,
     LinearRegression,
+    Ridge,
     LogisticRegression,
     PCA,
     SVC,
@@ -147,7 +151,11 @@ def test_inherited_failures_match_what_sklearn_declares():
     import sklearn.linear_model
     import sklearn.svm
 
-    for base, name in ((sklearn.svm.SVC, "SVC"), (sklearn.linear_model.LogisticRegression, "LogisticRegression")):
+    for base, name in (
+        (sklearn.svm.SVC, "SVC"),
+        (sklearn.linear_model.LogisticRegression, "LogisticRegression"),
+        (sklearn.linear_model.Ridge, "Ridge"),
+    ):
         declared = set(get_expected(base()))
         assert INHERITED_FAILURES[name] == declared, (
             f"scikit-learn's expected failures for {name} changed to {sorted(declared)}; "

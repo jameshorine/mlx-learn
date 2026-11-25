@@ -47,6 +47,7 @@ stock inheritance. See the [compatibility details](docs/support_matrix.md).
 | `mlxlearn.neighbors.KNeighborsRegressor` | 0.1.0 |
 | `mlxlearn.neighbors.RadiusNeighborsClassifier` | 0.1.7 |
 | `mlxlearn.neighbors.RadiusNeighborsRegressor` | 0.1.7 |
+| `mlxlearn.linear_model.Ridge` | unreleased; Layer 1 only, not yet patched |
 | `mlxlearn.linear_model.LogisticRegression` | 0.1.0 |
 | `mlxlearn.linear_model.LinearRegression` | 0.1.7, dense host solver with certified rank |
 | `mlxlearn.svm.SVC` (exact) | 0.1.0 |
@@ -54,7 +55,7 @@ stock inheritance. See the [compatibility details](docs/support_matrix.md).
 | `mlxlearn.cluster.EMeans` | 0.1.3; Metal GPU, paper/Faiss recipes |
 | `mlxlearn.cluster.KMeans` | 0.1.3; Metal GPU, Lloyd clustering; Metal k-means++ seeding since 0.1.6 |
 | `mlxlearn.cluster.OMeans` | 0.1.5; Metal GPU, e-means with a two-level centroid search |
-| `Ridge`, `DBSCAN`, `TSNE` | planned, 0.2.x |
+| `DBSCAN`, `TSNE` | planned, 0.2.x |
 | `SVR`, `NuSVR`, `NuSVC` | deferred — will not ship until they implement the true objective |
 | tree ensembles | out of scope |
 

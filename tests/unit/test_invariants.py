@@ -18,7 +18,7 @@ from sklearn.datasets import make_classification
 
 from mlxlearn._common.config import tuning_context
 from mlxlearn.decomposition import PCA
-from mlxlearn.linear_model import LinearRegression, LogisticRegression
+from mlxlearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from mlxlearn.neighbors import (
     KNeighborsClassifier,
     KNeighborsRegressor,
@@ -34,6 +34,7 @@ SUPERVISED = [
     (RadiusNeighborsClassifier, {"radius": 50.0}),
     (RadiusNeighborsRegressor, {"radius": 50.0}),
     (LinearRegression, {}),
+    (Ridge, {}),
     (LogisticRegression, {}),
     (SVC, {}),
 ]

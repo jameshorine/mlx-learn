@@ -12,5 +12,6 @@ from __future__ import annotations
 
 from ._linear import LinearRegression
 from ._logistic import LogisticRegression
+from ._ridge import Ridge
 
-__all__ = ["LinearRegression", "LogisticRegression"]
+__all__ = ["LinearRegression", "LogisticRegression", "Ridge"]

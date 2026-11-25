@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`linear_model.Ridge`** on dense data, for `solver` in `{"auto", "cholesky"}`.
+  scikit-learn's own `solver="auto"` resolves to `"cholesky"` for dense input with
+  `positive=False`, so the default path is the one served. Multi-output targets and
+  `sample_weight` are implemented; `positive=True`, sparse input, the other six solvers
+  and a per-target `alpha` whose entries differ all raise on Layer 1 and fall back under
+  `patch_sklearn()`.
+
+  The solve is `X'X + alpha*I` factored by float64 Cholesky on the host, which is the
+  same computation `_solve_cholesky` performs, and it falls back to the SVD filter
+  `s / (s**2 + alpha)` exactly where stock's `_ridge_regression` does. `device="gpu"` is
+  accepted and recorded as a host solve: the factorization is float64 and float64 does
+  not execute on Metal.
+
+  The solve routes as scikit-learn's does: the primal `d x d` Gram when
+  `n_features <= n_samples`, the dual `n x n` kernel otherwise, and the SVD filter
+  `s / (s**2 + alpha)` where stock's `_ridge_regression` falls back to it. `solver_`
+  reports the route actually taken, as stock's does.
+
+  Layer 1 only. `Ridge` is not in `patching/_registry.py`, so `patch_sklearn()` leaves
+  `sklearn.linear_model.Ridge` alone: an estimator is registered after all six gates
+  pass, and gate 6 wants a measured crossover that does not exist yet.
+
 ## [0.1.7] — 2026-11-23
 
 ### Added
