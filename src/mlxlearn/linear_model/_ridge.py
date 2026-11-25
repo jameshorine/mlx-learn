@@ -324,9 +324,11 @@ def _preprocess_as_stock(X, y, fit_intercept, weights):
             x_offset = X64.mean(axis=0)
             y_offset = y2.mean(axis=0)
         else:
-            total = float(np.sum(weights, dtype=np.float64))
-            x_offset = (weights @ X64) / total
-            y_offset = (weights @ y2) / total
+            # np.average, not `(w @ X) / total`: stock's `_preprocess_data` uses
+            # `_average`, whose pairwise summation differs from a BLAS dot in the last
+            # ulp, and matching it exactly costs nothing.
+            x_offset = np.average(X64, axis=0, weights=weights)
+            y_offset = np.average(y2, axis=0, weights=weights)
         X64 = X64 - x_offset
         y2 = y2 - y_offset
     else:
